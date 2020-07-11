@@ -15,51 +15,47 @@ with load.open(mpc.COMET_URL) as f:
 comets = comets.set_index('designation', drop=False)
 
 
-def neowise(lat, lon, month, day, hour, tzname,  minute=0, sunaltmax=-12.0, comet='C/2020 F3 (NEOWISE)'):
-    thistz = timezone(tzname)
-    now_there = datetime.datetime.now(thistz)
-    offset = now_there.utcoffset().total_seconds() / 60 / 60
-    # print (f"day {day} hour {hour}  / {hour-offset+2}")
-    hour = hour-offset+2
-    comet = sun + mpc.comet_orbit(comets.loc[comet], ts, GM_SUN)
-    obs = earth + Topos(lat, lon)
+def comet_visibility(start_dt, comet_name, lat, lng, tz='UTC', days=1, min_comet_alt=0, max_sun_alt=-12):
+    # get comet ephemris and observer's location in space
+    comet = sun + mpc.comet_orbit(comets.loc[comet_name], ts, GM_SUN)
+    obs = earth + Topos(lat, lng)
 
-    times = ts.utc(2020, month, day, hour, range(60*12))
-    # print(times[0].astimezone(thistz))
+    # build list of minutes
+    times = ts.utc(start_dt.year, start_dt.month, start_dt.day, start_dt.hour, range(60*24*days)) 
 
-    comet_alts, comet_azs = observe(comet, obs, times)
-    sun_alts, sun_azs = observe(sun, obs, times)
-    data = {'firstseen': {}, 'lastseen': {}}
-    for (t, comet_az, comet_alt, sun_alt) in zip(times, comet_azs.degrees, comet_alts.degrees, sun_alts.degrees):
-        # print(f"  {t.astimezone(thistz)} {comet_alt:.1f} {sun_alt:.1f}")
-        if comet_alt > 0.0:
-            # comet is above the horizon
-            if sun_alt <= sunaltmax:
-                # before/after nautical (-12) twilight/dusk
-                if len(data['firstseen']) == 0:
-                    data['firstseen']['time'] = t.astimezone(thistz)
-                    data['firstseen']['az'] = comet_az
-                    data['firstseen']['alt'] = comet_alt
-                    data['firstseen']['sun_alt'] = sun_alt
-                    # print(f"hi  {t.astimezone(thistz)} {comet_alt:.1f} {sun_alt:.1f}")
-            else:
-                # nautical dawn
-                if len(data['firstseen']) > 0  and len(data['lastseen']) == 0 :
-                    data['lastseen']['time'] = t.astimezone(thistz)
-                    data['lastseen']['az'] = comet_az
-                    data['lastseen']['alt'] = comet_alt
-                    data['lastseen']['sun_alt'] = sun_alt
-                    # print(f"bye {t.astimezone(thistz)} {comet_alt:.1f} {sun_alt:.1f}")
-        else:
-            # comet set after nautical dusk
-            if len(data['firstseen']) > 0 and len(data['lastseen']) == 0:
-                data['lastseen']['time'] = t.astimezone(thistz)
-                data['lastseen']['az'] = comet_az
-                data['lastseen']['alt'] = comet_alt
-                data['lastseen']['sun_alt'] = sun_alt
-                # print(f"bye {t.astimezone(thistz)} {comet_alt:.1f} {sun_alt:.1f}")
-    return data
+    # calculate comet and sun positions into lists of altitudes and azimuths for the comet and Sun
+    comet_alts, comet_azs, _ = observe(comet, obs, times) # position of comet from observers POV in alt/az
+    sun_alts, sun_azs, _ = observe(sun, obs, times) # position of Sun from observers POV in alt/az
 
+    # combine resulting lists
+    data = {'comet_alt': comet_alts.degrees, 'comet_az': comet_azs.degrees,
+            'sun_alt': sun_alts.degrees, 'sun_az': sun_azs.degrees}
+    if not all(v == len(times) for v in [len(list(x)) for x in data.values()]):
+        raise ValueError ("time and alt/az position lists for the comet and Sun are different sizes")
+    data['time'] = times.astimezone(timezone(tz))
+    df = pd.DataFrame.from_dict(data)
+
+    # filter out times where the comet is below the horizon or the sky is too bright
+    df_visible = df[(df.comet_alt > min_comet_alt) & (df.sun_alt < max_sun_alt)]
+    df_visible['delta_sec'] = [x.total_seconds() for x in df_visible.time.diff()]
+
+    # find
+    instances = []
+    instance = None
+    for index, row in df_visible.iterrows():
+        if row['delta_sec'] != 60:
+            row['comet_az_cardinal'] = degrees_to_cardinal(row['comet_az'])
+            if instance != None:
+                instance['end'] = prevrow.to_dict()
+            instance={'begin': row.to_dict()}
+            instances.append(instance)
+        prevrow = row.copy()
+    instance['end'] = prevrow.to_dict() # last row is setting of last instance
+
+    for instance in instances:
+        instance['duration'] = instance['end']['time'] - instance['begin']['time']
+
+    return(df_visible, instances)
 
 
 def observe(object, obs, times):
@@ -68,40 +64,10 @@ def observe(object, obs, times):
     alts, azs, distances = apparent.altaz()
     return alts, azs
 
-def buildtable(lat, lng, tzname):
-    str = f"<p>The comet will be most visible in the morning over the weekend before switching to better visibility in the evening early next week. YMMV</p>"
-    str += f"<h3>Visibility of Comet C/2020 F3 (NEOWISE) for {lat}, {lng}</h3>\n"
-    str += "<table border=1><tr><th rowspan=1>date</th>"
-    str += "<th colspan=1>morning (low on NE horizon)</th>"
-    str += "<th colspan=1>evening (low on NW horizon)</th>"
-    str += "</tr>\n"
-    for x in range(10, 18):
-        str += f"<tr><td>7/{x}</td>"
-        morning = neowise(lat, lng, 7, x, 0, tzname, sunaltmax=-x-3)
-        if 'time' in morning['firstseen']:
-            str += f"<td align='center'>{morning['firstseen']['time'].strftime('%-I:%M %p')}"
-            str += f" - {morning['lastseen']['time'].strftime('%-I:%M %p')}<br>"
-            str += f"<small>reaches {morning['lastseen']['alt']:.1f}&deg; above horizon</small>"
-            str += "</td>"
-        else:
-            str += "<td align=center>not visible</td>"
-        evening = neowise(lat, lng, 7, x, 12, tzname, sunaltmax=-x-3)
-        if 'time' in evening['firstseen']:
-            str += f" <td align='center'>{evening['firstseen']['time'].strftime('%-I:%M %p')}"
-            try:
-                str += f" - {evening['lastseen']['time'].strftime('%-I:%M %p')}<br>"
-                str += f"<small>appears {evening['firstseen']['alt']:.1f}&deg; above horizon</small>"
-                str += "</td>"
-            except:
-                str += f" - stays up until nautical dawn<br>"
-                str += f"<small>appears {evening['firstseen']['alt']:.1f}&deg; above horizon</small>"
-            str += "<tr>\n"
-        else:
-            str += "<td align=center>not visible</td>"
-    str += "</table>\n"
-   
-    return str
-
+def degrees_to_cardinal(d):
+    dirs = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
+    ix = round(d / (360. / len(dirs)))
+    return dirs[ix % len(dirs)]
 
 class MyTestCase(unittest.TestCase):
     def test_CDT(self):
