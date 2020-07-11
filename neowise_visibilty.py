@@ -7,9 +7,12 @@ from pytz import timezone
 import datetime
 
 load = Loader('/var/data')
-eph = load('de421.bsp')
-ts = load.timescale(builtin=True)
+eph = load('de421.bsp')# load JPL ephemeris, 421 is a reasonable general purpose one covering 1900-2050
+
+# ephemeris for Sun, Earth
 sun, earth = eph['sun'], eph['earth']
+
+# ephemeris for comets from Minor Planet Center
 with load.open(mpc.COMET_URL) as f:
     comets = mpc.load_comets_dataframe(f)
 comets = comets.set_index('designation', drop=False)
